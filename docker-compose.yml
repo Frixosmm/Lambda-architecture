@@ -1,0 +1,148 @@
+version: "3.8"
+services:
+
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    volumes:
+      - namenode:/hadoop/dfs/name
+    environment:
+      - CLUSTER_NAME=stocknode
+      - MULTIHOMED_NETWORK=1
+    env_file:
+      - ./hadoop-hive.env
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    # No underscores allowed in hostnames, do not use .Service.Name
+    #hostname: "datanode-{{.Task.Slot}}"
+    volumes:
+      - datanode:/hadoop/dfs/data
+    env_file:
+      - ./hadoop-hive.env
+    environment:
+      SERVICE_PRECONDITION: "namenode:9870"
+      MULTIHOMED_NETWORK: 1
+    ports:
+      - "50010:50010"
+      - "50020:50020"
+      - "9864:9864"
+      - "9866:9866"
+      - "9867:9867"
+
+  hive-server:
+    image: localhost:5000/lambda/hive:latest
+    build:
+      context: ./hive
+    env_file:
+      - ./hadoop-hive.env
+    environment:
+      MULTIHOMED_NETWORK: 1
+      HIVE_CORE_CONF_javax_jdo_option_ConnectionURL: "jdbc:postgresql://hive-metastore/metastore"
+      SERVICE_PRECONDITION: "namenode:9870 datanode:9864 hive-metastore:9083 hive-metastore-postgresql:5432"
+    ports:
+      - "10000:10000"
+      - "10002:10002"
+
+  hive-metastore:
+    image: localhost:5000/lambda/hive:latest
+    build:
+      context: ./hive
+    env_file:
+      - ./hadoop-hive.env
+    # --hiveconf hive.root.logger=INFO,console
+    command: /opt/hive/bin/hive --service metastore
+    environment:
+      MULTIHOMED_NETWORK: 1
+      SERVICE_PRECONDITION: "namenode:9870 datanode:9864 hive-metastore-postgresql:5432"
+    ports:
+      - "9083:9083"
+
+  hive-metastore-postgresql:
+    image: localhost:5000/lambda/hive-metastore-postgresql:latest
+    build:
+      context: ./hive-metastore-postgresql
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+
+  spark-master:
+    image: bde2020/spark-master:3.0.2-hadoop3.2
+    # image: localhost:5000/lambda/spark-master:latest
+    # build:
+    #   context: ./spark-master
+    hostname: spark-master
+    ports:
+      - "6066:6066"
+      - "7077:7077"
+      - "8080:8080"
+    environment:
+      - INIT_DAEMON_STEP=setup_spark
+      # - SPARK_MASTER_HOST=0.0.0.0
+
+  spark-worker:
+    image: bde2020/spark-worker:3.0.2-hadoop3.2
+    # image: localhost:5000/lambda/spark-worker:latest
+    # build:
+    #   context: ./spark-worker
+    hostname: "spark-worker-{{.Task.Slot}}"
+    deploy:
+      replicas: 1
+    depends_on:
+      - spark-master
+    ports:
+      - "8081:8081"
+      - "4040:4040"
+    environment:
+      - "SPARK_MASTER=spark://spark-master:7077"
+
+  zookeeper:
+    image: wurstmeister/zookeeper
+    ports:
+    - "2181:2181"
+
+  kafka:
+    image: wurstmeister/kafka:2.13-2.7.0
+    ports:
+      - target: 9094
+        published: 9094
+        protocol: tcp
+        mode: host
+    environment:
+      KAFKA_CREATE_TOPICS: "live-stock-data:1:1"
+      HOSTNAME_COMMAND: "docker info | grep ^Name: | cut -d' ' -f 2"
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: INSIDE://:9092,OUTSIDE://_{HOSTNAME_COMMAND}:9094
+      KAFKA_LISTENERS: INSIDE://:9092,OUTSIDE://:9094
+      KAFKA_INTER_BROKER_LISTENER_NAME: INSIDE
+
+  gen-stock:
+    image: localhost:5000/lambda/gen-stock:latest
+    build:
+      context: ./stock
+    depends_on:
+      - kafka
+    environment:
+      GENSTOCK_KAFKA_CHANNEL: live-stock-data
+      GENSTOCK_KAFKA_HOST: kafka:9092
+      GENSTOCK_TICKER_NAMES_FILE: ticker_symbols_small
+
+  # proxy:
+  #   image: localhost:5000/lambda/proxy
+  #   build:
+  #     context: ./proxy
+  #   ports:
+  #     - "80:80"
+  #     - "13001-13010:13001-13010"
+
+volumes:
+  namenode:
+  datanode:
+  # hadoop_historyserver:
+
+networks:
+  default:
+    driver: overlay
+    attachable: true

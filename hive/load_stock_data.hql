@@ -1,0 +1,2 @@
+create table Stock (date_ date, open float, high float, low float, close float, volume int, name string) row format delimited fields terminated by ',' stored as textfile;
+load data local inpath '/tmp/stock.csv' overwrite into table Stock;
